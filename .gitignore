@@ -1,0 +1,10 @@
+# Claude Code local config (memory, session data)
+.claude/projects/
+.claude/memory/
+
+# Uploaded product images (user content, not source code)
+uploads/
+
+# OS noise
+.DS_Store
+Thumbs.db
