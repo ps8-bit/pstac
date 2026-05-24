@@ -360,7 +360,7 @@ function Inbound({ goTo, pushToast }) {
           <div className="page-sub">บันทึก GR-26051902 • PO-2025-0489 • Tech Wave Co. • กำลังตรวจนับ</div>
         </div>
         <div className="row">
-          <button className="btn" onClick={() => alert("ดูประวัติการรับเข้าทั้งหมด")}><Icons.History/> ประวัติการรับเข้า</button>
+          <button className="btn" onClick={() => goTo && goTo("history")}><Icons.History/> ประวัติการรับเข้า</button>
           <button
             className="btn btn-primary"
             disabled={received.length === 0 || closed}
@@ -463,7 +463,17 @@ function Inbound({ goTo, pushToast }) {
           </div>
           <div className="row">
             <button className="btn btn-ghost btn-sm" onClick={() => window.location.reload()}><Icons.Refresh size={14}/></button>
-            <button className="btn btn-sm" onClick={() => alert("ส่งออก CSV ของการสแกนรับเข้า")}> ส่งออก CSV</button>
+            <button className="btn btn-sm" onClick={() => {
+              if (!received.length) return;
+              const cols = ["SKU", "ชื่อสินค้า", "ตำแหน่งจัดเก็บ", "จำนวนรับ"];
+              const rows = received.map(r => [r.sku, r.name, r.loc, r.qty]);
+              const csv = [cols, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+              const a = document.createElement("a");
+              a.href = URL.createObjectURL(new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" }));
+              a.download = `GR-inbound-${new Date().toISOString().slice(0,10)}.csv`;
+              a.click();
+              URL.revokeObjectURL(a.href);
+            }}>ส่งออก CSV</button>
           </div>
         </div>
         <table className="t">
@@ -483,7 +493,7 @@ function Inbound({ goTo, pushToast }) {
                 <td>{r.name}</td>
                 <td><span className="badge badge-neutral"><Icons.Map size={11}/>{r.loc}</span></td>
                 <td className="t-num tnum"><span style={{ fontWeight: 500 }}>{r.qty}</span></td>
-                <td><button className="btn btn-ghost btn-icon" onClick={() => alert("แก้ไขรายการรับเข้า: " + r.name)}><Icons.Edit size={14}/></button></td>
+                <td><button className="btn btn-ghost btn-icon" title={`แก้ไข ${r.sku}`} onClick={() => pushToast(`แก้ไข ${r.sku} — ใช้หน้า สินค้าคงคลัง เพื่อปรับจำนวน`)}><Icons.Edit size={14}/></button></td>
               </tr>
             ))}
           </tbody>
@@ -611,6 +621,15 @@ function Outbound({ goTo, pushToast }) {
     window.addEventListener("ims-sell-order", handler);
     return () => window.removeEventListener("ims-sell-order", handler);
   }, []);
+
+  // Bulk-status dropdown ref + click-outside to close
+  const obBulkMenuRef = useRef(null);
+  useEffect(() => {
+    if (!obBulkMenu) return;
+    const h = (e) => { if (obBulkMenuRef.current && !obBulkMenuRef.current.contains(e.target)) setObBulkMenu(null); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [obBulkMenu]);
 
   // Tab definitions — index 0 = "all", 1-4 map to real status values
   const TABS       = ["ทั้งหมด", "กำลังหยิบ", "พร้อมส่ง", "ส่งแล้ว", "จัดส่งสำเร็จ"];
@@ -791,7 +810,7 @@ ${toPrint.map((o,i) => `<tr><td class="mono">${i+1}</td><td class="mono">${o.id}
             <h3>ยอดตัดสต็อกตามช่องทาง</h3>
             <div className="sub">วันนี้ • รวม {CHANNELS.reduce((s,c)=>s+c.today,0)} ออร์เดอร์</div>
           </div>
-          <button className="btn btn-ghost btn-sm" onClick={() => alert("ดูรายงานตัดสต็อกตามช่องทาง")}> ดูรายงาน <Icons.Chev size={14}/></button>
+          <button className="btn btn-ghost btn-sm" onClick={() => goTo && goTo("analytics")}>ดูรายงาน <Icons.Chev size={14}/></button>
         </div>
         <div style={{ padding: "12px 18px 18px", display: "grid", gridTemplateColumns: "repeat(6, 1fr)", gap: 12 }}>
           {CHANNELS.map(c => {
@@ -875,7 +894,7 @@ ${toPrint.map((o,i) => `<tr><td class="mono">${i+1}</td><td class="mono">${o.id}
             }}/>
             <BulkBtn icon={<Icons.Trash size={13}/>} label="ลบ" onClick={bulkDeleteOrders} danger/>
             {obBulkMenu === "status" && (
-              <div ref={null} style={{
+              <div ref={obBulkMenuRef} style={{
                 position: "absolute", top: "calc(100% + 8px)", right: 0,
                 background: "var(--surface)", color: "var(--fg)",
                 border: "1px solid var(--border)", borderRadius: 12,
@@ -1416,7 +1435,12 @@ function Inventory({ pushToast, density, goTo }) {
           <div className="page-sub">{liveProducts.length} SKU • รวม {liveProducts.reduce((s,p)=>s+p.qty,0).toLocaleString()} ชิ้น</div>
         </div>
         <div className="row">
-          <button className="btn"><Icons.Print/> พิมพ์รายงาน</button>
+          <button className="btn" onClick={() => {
+            const w = window.open("", "_blank");
+            const rows = filtered.map(p => { const s = stockStatus(p); return `<tr><td class="mono">${p.sku}</td><td>${p.name}</td><td>${p.cat}</td><td class="r mono">${p.qty}</td><td class="r mono">${p.reorder}</td><td class="mono">${p.loc}</td><td>${s.label}</td></tr>`; }).join("");
+            w.document.write(`<!DOCTYPE html><html><head><title>รายงานสินค้าคงคลัง</title><style>*{box-sizing:border-box}body{font-family:sans-serif;padding:24px;color:#111;font-size:13px}h2{margin:0 0 4px}p{margin:0 0 16px;color:#555}button{padding:8px 18px;cursor:pointer;margin-bottom:16px}table{width:100%;border-collapse:collapse}th{background:#f5f5f5;padding:8px 10px;text-align:left;border-bottom:2px solid #ddd;font-size:12px;font-weight:600}td{padding:7px 10px;border-bottom:1px solid #eee}.mono{font-family:monospace;font-size:12px}.r{text-align:right}@media print{button{display:none!important}}</style></head><body><h2>รายงานสินค้าคงคลัง</h2><p>${new Date().toLocaleDateString("th-TH",{dateStyle:"full"})} · ${filtered.length} รายการ</p><button onclick="window.print()">🖨 พิมพ์</button><table><thead><tr><th>SKU</th><th>ชื่อสินค้า</th><th>หมวด</th><th class="r">คงเหลือ</th><th class="r">จุดสั่ง</th><th>ตำแหน่ง</th><th>สถานะ</th></tr></thead><tbody>${rows}</tbody></table></body></html>`);
+            w.document.close();
+          }}><Icons.Print/> พิมพ์รายงาน</button>
           <button className="btn" onClick={() => goTo && goTo("import")}><Icons.Pkg size={14}/> นำเข้า SKU จาก Excel</button>
           <button className="btn btn-accent" onClick={() => setAddOpen(true)}><Icons.Plus/> เพิ่ม SKU</button>
         </div>

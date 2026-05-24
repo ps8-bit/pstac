@@ -55,6 +55,9 @@ function _orderToRow(o) {
     item_count:    typeof o.items === 'number' ? o.items
                    : (Array.isArray(o.items) ? o.items.length : 0),
     is_bundle:     o.isBundle   || false,
+    bundle_name:   o.bundleName || '',
+    line_items:    o.lineItems  || null,
+    deductions:    o.deductions || null,
     shipping_addr: o.shippingAddr || '',
     cod_amount:    Number(o.codAmount) || 0,
     note:          o.note       || '',
@@ -76,6 +79,9 @@ function _rowToOrder(row) {
     tracking:     row.tracking   || '',
     items:        row.item_count ?? 0,
     isBundle:     row.is_bundle  || false,
+    bundleName:   row.bundle_name || '',
+    lineItems:    row.line_items  || [],
+    deductions:   row.deductions  || [],
     shippingAddr: row.shipping_addr || '',
     codAmount:    row.cod_amount || 0,
     note:         row.note       || '',
@@ -93,7 +99,26 @@ async function dbLoadOrders() {
 async function dbUpsertOrders(orders) {
   if (!orders || !orders.length) return;
   const { error } = await sb.from('orders').upsert(orders.map(_orderToRow));
-  if (error) console.error('[DB] upsert orders:', error.message);
+  if (error) {
+    // If the DB schema is missing the new JSONB columns, fall back to base fields
+    // (run migration-orders.sql in Supabase SQL Editor to enable full persistence)
+    if (error.message && /line_items|bundle_name|deductions/.test(error.message)) {
+      const baseRows = orders.map(o => ({
+        id: o.id, channel: o.channel || '', customer: o.customer || '',
+        phone: o.phone || '', status: o.status || 'picking',
+        carrier: o.carrier || '', tracking: o.tracking || '',
+        item_count: typeof o.items === 'number' ? o.items : (Array.isArray(o.items) ? o.items.length : 0),
+        is_bundle: o.isBundle || false, shipping_addr: o.shippingAddr || '',
+        cod_amount: Number(o.codAmount) || 0, note: o.note || '',
+        date_iso: o.dateIso || new Date().toISOString().slice(0, 10)
+      }));
+      const { error: e2 } = await sb.from('orders').upsert(baseRows);
+      if (e2) console.error('[DB] upsert orders (fallback):', e2.message);
+      else console.warn('[DB] orders saved without line_items/deductions — run migration-orders.sql to enable full persistence');
+    } else {
+      console.error('[DB] upsert orders:', error.message);
+    }
+  }
 }
 async function dbDeleteOrder(id) {
   const { error } = await sb.from('orders').delete().eq('id', id);

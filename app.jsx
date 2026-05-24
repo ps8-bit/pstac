@@ -1,6 +1,6 @@
 /* Main app: AuthGate + sidebar + routing + tweaks + layout customization */
 
-const { useState: useStateApp, useEffect: useEffectApp, useRef: useRefApp } = React;
+const { useState: useStateApp, useEffect: useEffectApp, useRef: useRefApp, useMemo: useMemoApp } = React;
 
 const ALL_NAV = [
   { id: "dashboard", label: "หน้าหลัก",       icon: Icons.Dash,    group: "main" },
@@ -53,19 +53,16 @@ function computeBadges() {
   // --- inbound: low-stock / out-of-stock products ---
   const inbound = PRODUCTS.filter(p => p.qty <= p.reorder).length;
 
-  // --- outbound: orders not yet shipped ---
-  let ordersArr = OUTBOUND;
-  try {
-    const raw = localStorage.getItem("ims_orders");
-    if (raw !== null) { const a = JSON.parse(raw); if (Array.isArray(a)) ordersArr = a; }
-  } catch (e) {}
-  const outbound = ordersArr.filter(o => o.status === "picking" || o.status === "packed").length;
+  // --- outbound: orders not yet shipped (prefer Supabase cache) ---
+  const outbound = loadOrders().filter(o => o.status === "picking" || o.status === "packed").length;
 
-  // --- labels: items in print queue ---
-  let labelsArr = SAMPLE_LABELS;
+  // --- labels: items in print queue (prefer Supabase cache) ---
+  let labelsArr = window._DB_LABELS || SAMPLE_LABELS;
   try {
-    const raw = localStorage.getItem("ims_labels");
-    if (raw !== null) { const a = JSON.parse(raw); if (Array.isArray(a)) labelsArr = a; }
+    if (!window._DB_LABELS) {
+      const raw = localStorage.getItem("ims_labels");
+      if (raw !== null) { const a = JSON.parse(raw); if (Array.isArray(a)) labelsArr = a; }
+    }
   } catch (e) {}
   const labels = labelsArr.length;
 
@@ -90,6 +87,166 @@ function useBadges() {
     };
   }, []);
   return b;
+}
+
+/* ======== GLOBAL SEARCH OVERLAY ======== */
+function SearchOverlay({ q, setQ, onClose, goTo }) {
+  const inputRef = useRefApp(null);
+  useEffectApp(() => { inputRef.current?.focus(); }, []);
+
+  const results = useMemoApp(() => {
+    const lq = q.trim().toLowerCase();
+    if (!lq) return { products: [], orders: [] };
+    return {
+      products: PRODUCTS.filter(p =>
+        p.sku.toLowerCase().includes(lq) ||
+        p.name.toLowerCase().includes(lq) ||
+        p.supplier.toLowerCase().includes(lq)
+      ).slice(0, 6),
+      orders: loadOrders().filter(o =>
+        o.id.toLowerCase().includes(lq) ||
+        (o.customer || "").toLowerCase().includes(lq) ||
+        (o.channel || "").toLowerCase().includes(lq)
+      ).slice(0, 4)
+    };
+  }, [q]);
+
+  const hasResults = results.products.length > 0 || results.orders.length > 0;
+
+  return (
+    <>
+      <div style={{ position:"fixed", inset:0, zIndex:200, background:"rgba(0,0,0,0.4)", backdropFilter:"blur(2px)" }} onClick={onClose}/>
+      <div style={{ position:"fixed", top:72, left:"50%", transform:"translateX(-50%)", width:"100%", maxWidth:640, zIndex:201, padding:"0 16px" }}>
+        <div style={{ background:"var(--surface)", border:"1px solid var(--border)", borderRadius:16, boxShadow:"var(--shadow-lg)", overflow:"hidden" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:12, padding:"14px 18px", borderBottom:"1px solid var(--border)" }}>
+            <Icons.Search size={16} style={{ color:"var(--muted)", flexShrink:0 }}/>
+            <input
+              ref={inputRef}
+              value={q}
+              onChange={e => setQ(e.target.value)}
+              placeholder="ค้นหา SKU, ชื่อสินค้า, เลขออร์เดอร์, ลูกค้า..."
+              style={{ flex:1, border:"none", outline:"none", background:"transparent", fontSize:15, color:"var(--fg)", fontFamily:"inherit" }}
+            />
+            <span className="kbd" style={{ cursor:"pointer" }} onClick={onClose}>Esc</span>
+          </div>
+
+          {!q.trim() ? (
+            <div style={{ padding:"28px 18px", color:"var(--muted)", fontSize:13, textAlign:"center" }}>
+              พิมพ์เพื่อค้นหา SKU, ชื่อสินค้า, เลขออร์เดอร์ หรือชื่อลูกค้า
+            </div>
+          ) : !hasResults ? (
+            <div style={{ padding:"28px 18px", color:"var(--muted)", fontSize:13, textAlign:"center" }}>
+              ไม่พบผลลัพธ์สำหรับ "<strong>{q}</strong>"
+            </div>
+          ) : (
+            <div style={{ maxHeight:420, overflowY:"auto" }}>
+              {results.products.length > 0 && (<>
+                <div style={{ padding:"8px 18px 4px", fontSize:11, fontWeight:600, color:"var(--muted)", letterSpacing:"0.06em", textTransform:"uppercase" }}>สินค้า</div>
+                {results.products.map(p => {
+                  const st = stockStatus(p);
+                  return (
+                    <div key={p.sku} className="search-hit" onClick={() => { goTo("inventory"); onClose(); }}>
+                      <Icons.Box size={14} style={{ color:"var(--muted)", flexShrink:0 }}/>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:13, fontWeight:500, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.name}</div>
+                        <div style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace" }}>{p.sku} · {p.supplier}</div>
+                      </div>
+                      <span className={"badge " + st.cls} style={{ fontSize:10, flexShrink:0 }}>{p.qty} ชิ้น</span>
+                    </div>
+                  );
+                })}
+              </>)}
+              {results.orders.length > 0 && (<>
+                <div style={{ padding:"8px 18px 4px", fontSize:11, fontWeight:600, color:"var(--muted)", letterSpacing:"0.06em", textTransform:"uppercase", marginTop:4 }}>ออร์เดอร์</div>
+                {results.orders.map(o => {
+                  const stCls = { picking:"badge-warning", packed:"badge-info", shipped:"badge-success", delivered:"badge-neutral" }[o.status] || "badge-neutral";
+                  const stLab = { picking:"กำลังหยิบ", packed:"พร้อมส่ง", shipped:"ส่งแล้ว", delivered:"จัดส่งสำเร็จ" }[o.status] || o.status;
+                  return (
+                    <div key={o.id} className="search-hit" onClick={() => { goTo("outbound"); onClose(); }}>
+                      <Icons.Truck size={14} style={{ color:"var(--muted)", flexShrink:0 }}/>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:13, fontWeight:500 }}>{o.customer}</div>
+                        <div style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace" }}>{o.id} · {o.channel}</div>
+                      </div>
+                      <span className={"badge " + stCls} style={{ fontSize:10, flexShrink:0 }}>{stLab}</span>
+                    </div>
+                  );
+                })}
+              </>)}
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/* ======== NOTIFICATION POPOVER ======== */
+function NotifPopover({ onClose, goTo }) {
+  const outOfStock = PRODUCTS.filter(p => p.qty === 0);
+  const lowStock   = PRODUCTS.filter(p => p.qty > 0 && p.qty <= p.reorder);
+  const pending    = loadOrders().filter(o => o.status === "picking" || o.status === "packed");
+  const nothing    = outOfStock.length === 0 && lowStock.length === 0 && pending.length === 0;
+
+  return (
+    <div style={{ position:"absolute", top:"calc(100% + 8px)", right:0, width:320, background:"var(--surface)", border:"1px solid var(--border)", borderRadius:14, boxShadow:"var(--shadow-lg)", zIndex:60, overflow:"hidden" }}>
+      <div style={{ padding:"12px 16px 8px", fontSize:13, fontWeight:600, borderBottom:"1px solid var(--border)" }}>การแจ้งเตือน</div>
+
+      {nothing && (
+        <div style={{ padding:"24px 16px", textAlign:"center", color:"var(--muted)", fontSize:13 }}>✅ ไม่มีการแจ้งเตือนใหม่</div>
+      )}
+
+      {outOfStock.length > 0 && (
+        <div style={{ padding:"8px 16px 4px" }}>
+          <div style={{ fontSize:11, fontWeight:700, color:"var(--danger)", marginBottom:6, textTransform:"uppercase", letterSpacing:"0.05em" }}>
+            หมดสต็อก ({outOfStock.length})
+          </div>
+          {outOfStock.slice(0, 4).map(p => (
+            <div key={p.sku} className="notif-row" onClick={() => { goTo("inventory"); onClose(); }}>
+              <span style={{ width:7, height:7, borderRadius:999, background:"var(--danger)", flexShrink:0 }}/>
+              <span style={{ flex:1, fontSize:12, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.name}</span>
+              <span style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace", flexShrink:0 }}>{p.sku}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {lowStock.length > 0 && (
+        <div style={{ padding:"8px 16px 4px" }}>
+          <div style={{ fontSize:11, fontWeight:700, color:"var(--warning)", marginBottom:6, textTransform:"uppercase", letterSpacing:"0.05em" }}>
+            ใกล้หมด ({lowStock.length})
+          </div>
+          {lowStock.slice(0, 5).map(p => (
+            <div key={p.sku} className="notif-row" onClick={() => { goTo("inventory"); onClose(); }}>
+              <span style={{ width:7, height:7, borderRadius:999, background:"var(--warning)", flexShrink:0 }}/>
+              <span style={{ flex:1, fontSize:12, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{p.name}</span>
+              <span style={{ fontSize:11, fontWeight:600, color:"var(--warning)", fontFamily:"IBM Plex Mono, monospace", flexShrink:0 }} className="tnum">{p.qty}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {pending.length > 0 && (
+        <div style={{ padding:"8px 16px 4px" }}>
+          <div style={{ fontSize:11, fontWeight:700, color:"var(--info)", marginBottom:6, textTransform:"uppercase", letterSpacing:"0.05em" }}>
+            ออร์เดอร์ค้างส่ง ({pending.length})
+          </div>
+          {pending.slice(0, 4).map(o => (
+            <div key={o.id} className="notif-row" onClick={() => { goTo("outbound"); onClose(); }}>
+              <span style={{ width:7, height:7, borderRadius:999, background:"var(--info)", flexShrink:0 }}/>
+              <span style={{ flex:1, fontSize:12 }}>{o.customer}</span>
+              <span style={{ fontSize:11, color:"var(--muted)", fontFamily:"IBM Plex Mono, monospace", flexShrink:0 }}>{o.id}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ padding:"8px 16px 10px", borderTop:"1px solid var(--border)", display:"flex", justifyContent:"space-between", marginTop:4 }}>
+        <button className="btn btn-ghost btn-sm" onClick={() => { goTo("inventory"); onClose(); }}>ดูสินค้า →</button>
+        <button className="btn btn-ghost btn-sm" onClick={() => { goTo("outbound"); onClose(); }}>ดูออร์เดอร์ →</button>
+      </div>
+    </div>
+  );
 }
 
 /* ======== ROOT WITH AUTH GATE ======== */
@@ -237,6 +394,10 @@ function App({ user, onLogout, onSwitchUser }) {
   const [toast, setToast] = useStateApp(null);
   const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
   const [sellOpen, setSellOpen] = useStateApp(false);
+  const [searchOpen, setSearchOpen] = useStateApp(false);
+  const [searchQ, setSearchQ] = useStateApp("");
+  const [notifOpen, setNotifOpen] = useStateApp(false);
+  const notifRef = useRefApp(null);
 
   // Expose current user for audit log
   useEffectApp(() => { window.__currentUser = user; }, [user]);
@@ -294,6 +455,31 @@ function App({ user, onLogout, onSwitchUser }) {
   useEffectApp(() => {
     document.documentElement.setAttribute("data-density", t.density);
   }, [t.density]);
+
+  // ⌘K / Ctrl+K → open search; Escape → close overlays
+  useEffectApp(() => {
+    const h = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setSearchQ("");
+        setSearchOpen(true);
+      }
+      if (e.key === "Escape") { setSearchOpen(false); setNotifOpen(false); }
+    };
+    document.addEventListener("keydown", h);
+    return () => document.removeEventListener("keydown", h);
+  }, []);
+
+  // Close notif popover on outside click
+  useEffectApp(() => {
+    if (!notifOpen) return;
+    const h = (e) => { if (notifRef.current && !notifRef.current.contains(e.target)) setNotifOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [notifOpen]);
+
+  const notifCount = PRODUCTS.filter(p => p.qty <= p.reorder).length +
+    loadOrders().filter(o => o.status === "picking" || o.status === "packed").length;
 
   const pushToast = (msg) => {
     setToast(msg);
@@ -356,19 +542,22 @@ function App({ user, onLogout, onSwitchUser }) {
             <span>WMS</span> <span style={{ margin: "0 8px", color: "var(--faint)" }}>/</span> <strong>{CRUMB_MAP[page]}</strong>
           </div>
           <div className="topbar-right">
-            <div className="search">
+            <div className="search" onClick={() => { setSearchQ(""); setSearchOpen(true); }} style={{ cursor:"pointer", userSelect:"none" }}>
               <Icons.Search size={14}/>
-              <input placeholder="ค้นหา SKU, ออร์เดอร์, ลูกค้า..."/>
+              <span style={{ fontSize:13, color:"var(--muted)", flex:1 }}>ค้นหา SKU, ออร์เดอร์, ลูกค้า...</span>
               <span className="kbd">⌘K</span>
             </div>
             <button className="btn btn-primary" onClick={() => setSellOpen(true)} style={{ gap: 7 }}>
               <Icons.Cart size={14}/> ขายสินค้า
             </button>
-            <button className="btn btn-ghost btn-icon" onClick={() => alert("ช่วยเหลือ: สำหรับคำถามเพิ่มเติม ติดต่อ admin@bangkokfulfill.co")}><Icons.Help size={16}/></button>
-            <button className="btn btn-ghost btn-icon" style={{ position: "relative" }} onClick={() => alert("การแจ้งเตือน: ไม่มีข้อความใหม่")}>
-              <Icons.Bell size={16}/>
-              <span style={{ position: "absolute", top: 5, right: 5, width: 7, height: 7, borderRadius: 999, background: "var(--danger)" }}/>
-            </button>
+            <button className="btn btn-ghost btn-icon" title="ช่วยเหลือ" onClick={() => alert("สำหรับคำถามเพิ่มเติม ติดต่อ admin@bangkokfulfill.co")}><Icons.Help size={16}/></button>
+            <div ref={notifRef} style={{ position:"relative" }}>
+              <button className="btn btn-ghost btn-icon" style={{ position:"relative" }} onClick={() => setNotifOpen(o => !o)}>
+                <Icons.Bell size={16}/>
+                {notifCount > 0 && <span style={{ position:"absolute", top:5, right:5, width:7, height:7, borderRadius:999, background:"var(--danger)" }}/>}
+              </button>
+              {notifOpen && <NotifPopover onClose={() => setNotifOpen(false)} goTo={goTo}/>}
+            </div>
           </div>
         </header>
 
@@ -403,6 +592,8 @@ function App({ user, onLogout, onSwitchUser }) {
           }}
         />
       )}
+
+      {searchOpen && <SearchOverlay q={searchQ} setQ={setSearchQ} onClose={() => setSearchOpen(false)} goTo={goTo}/>}
 
       <TweaksPanel title="ปรับแต่งหน้าจอ">
         <TweakSection label="การแสดงผล">
