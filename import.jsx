@@ -76,8 +76,34 @@ function ImportPage({ pushToast, goTo }) {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const data = new Uint8Array(e.target.result);
-        const wb = XLSX.read(data, { type: "array" });
+        const rawBytes = new Uint8Array(e.target.result);
+        let wb;
+
+        if (ext === "csv") {
+          /* ── CSV encoding detection ──
+             Thai CSV files from Windows/Excel use Windows-874 (TIS-620).
+             1. Check for UTF-8 BOM (EF BB BF) → read as UTF-8
+             2. Decode as UTF-8; if replacement chars (U+FFFD) appear → re-decode as Windows-874
+             3. Fall back to iso-8859-11 if windows-874 label not supported  */
+          const hasBOM = rawBytes[0] === 0xEF && rawBytes[1] === 0xBB && rawBytes[2] === 0xBF;
+          let csvText;
+          if (hasBOM) {
+            csvText = new TextDecoder("utf-8").decode(rawBytes);
+          } else {
+            const utf8 = new TextDecoder("utf-8").decode(rawBytes);
+            if (utf8.includes("�")) {
+              // Garbled Thai — try Windows-874 (TIS-620)
+              try { csvText = new TextDecoder("windows-874").decode(rawBytes); }
+              catch { csvText = new TextDecoder("iso-8859-11").decode(rawBytes); }
+            } else {
+              csvText = utf8;
+            }
+          }
+          wb = XLSX.read(csvText, { type: "string" });
+        } else {
+          wb = XLSX.read(rawBytes, { type: "array" });
+        }
+
         const sheet = wb.Sheets[wb.SheetNames[0]];
         const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
         // skip header row, drop empty rows
