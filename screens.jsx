@@ -130,67 +130,63 @@ function CameraScanner({ onScan, onClose }) {
         const tryPlay = () => v.play().catch(() => {});
         if (v.readyState >= 1) tryPlay(); else v.onloadedmetadata = tryPlay;
 
-        /* Shared canvas — draw video frame here before every detect call */
-        const scanCanvas = document.createElement("canvas");
-        const scanCtx    = scanCanvas.getContext("2d", { willReadFrequently: true });
-        const drawFrame  = (vid) => {
-          const w = vid.videoWidth || 640, h = vid.videoHeight || 480;
-          if (scanCanvas.width !== w)  scanCanvas.width  = w;
-          if (scanCanvas.height !== h) scanCanvas.height = h;
-          scanCtx.drawImage(vid, 0, 0, w, h);
-        };
-
+        /* ── detector setup ──────────────────────────────────────────
+           BarcodeDetector: feed the <video> element directly — no canvas
+             needed, avoids cross-origin / tainted-canvas issues on iOS.
+           ZXing: needs ImageData, so use an offscreen canvas only for that. */
         let detectFn;
         if (hasDetector) {
-          /* Always query supported formats so we never pass an unknown one */
-          const allFmts = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39","code_93","qr_code","data_matrix","itf","aztec"];
+          const allFmts = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39",
+                           "code_93","qr_code","data_matrix","itf","aztec","codabar"];
           const supported = await BarcodeDetector.getSupportedFormats().catch(() => allFmts);
           const fmts = allFmts.filter(f => supported.includes(f));
           const bd = new BarcodeDetector({ formats: fmts.length ? fmts : allFmts });
           detectFn = async (vid) => {
-            drawFrame(vid);
-            const h = await bd.detect(scanCanvas); // canvas, NOT video element
-            return h.length ? h[0].rawValue : null;
+            /* Pass video element directly — most reliable on iOS Safari */
+            const hits = await bd.detect(vid);
+            return hits.length ? hits[0].rawValue : null;
           };
         } else {
-          const hints = new Map([[ZXing.DecodeHintType.TRY_HARDER, true]]);
-          const reader = new ZXing.MultiFormatReader();
+          /* ZXing fallback — needs canvas + ImageData */
+          const zCanvas = document.createElement("canvas");
+          const zCtx    = zCanvas.getContext("2d", { willReadFrequently: true });
+          const hints   = new Map([[ZXing.DecodeHintType.TRY_HARDER, true]]);
+          const reader  = new ZXing.MultiFormatReader();
           reader.setHints(hints);
           detectFn = async (vid) => {
-            drawFrame(vid);
+            const w = vid.videoWidth || 640, h = vid.videoHeight || 480;
+            if (zCanvas.width !== w)  zCanvas.width  = w;
+            if (zCanvas.height !== h) zCanvas.height = h;
+            zCtx.drawImage(vid, 0, 0, w, h);
             try {
-              const id  = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
-              const lum = new ZXing.RGBLuminanceSource(id.data, scanCanvas.width, scanCanvas.height);
+              const id  = zCtx.getImageData(0, 0, w, h);
+              const lum = new ZXing.RGBLuminanceSource(id.data, w, h);
               return reader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum))).getText();
             } catch (_) { return null; }
           };
         }
 
         setPhase("ready");
-        let busy = false; // prevent overlapping detect calls
+        /* Streak = 1: fire as soon as ONE confident detection comes back.
+           Previous streak-2 requirement caused misses when iOS detection
+           took longer than the poll interval. */
         const scan = async () => {
-          if (dead || busy) return;
+          if (dead) return;
           const vid = videoRef.current;
-          if (vid && vid.readyState >= 2 && !vid.paused) {
-            busy = true;
-            try {
-              const val = await detectFn(vid);
-              if (val && !dead) {
-                const lr = lastRef.current;
-                if (val === lr.code) {
-                  lr.streak++;
-                  if (lr.streak >= 2) {
-                    dead = true; clearInterval(timerRef.current);
-                    streamRef.current?.getTracks().forEach(t => t.stop());
-                    onScan(val); return;
-                  }
-                } else { lastRef.current = { code: val, streak: 1 }; }
-              }
-            } catch (_) {}
-            busy = false;
-          }
+          if (!vid || vid.readyState < 2 || vid.paused) return;
+          try {
+            const val = await detectFn(vid);
+            if (val && !dead) {
+              dead = true;
+              clearInterval(timerRef.current);
+              streamRef.current?.getTracks().forEach(t => t.stop());
+              onScan(val);
+            }
+          } catch (_) {}
         };
-        timerRef.current = setInterval(scan, 250);
+        /* 300ms gives iOS enough time to finish each detect() call
+           without overlapping; no busyFlag needed since we await inside */
+        timerRef.current = setInterval(scan, 300);
 
       } catch (err) {
         if (dead) return;
