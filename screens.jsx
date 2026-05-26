@@ -219,53 +219,102 @@ function CameraScanner({ onScan, onClose }) {
     };
   }, []);
 
-  /* Decode a File/Blob using BarcodeDetector or ZXing.
-     Strategy:
-       1. BarcodeDetector with raw Blob — no canvas, no size limit, fastest on iOS
-       2. BarcodeDetector with ImageBitmap — explicit snapshot fallback
-       3. ZXing with canvas scaled to ≤1600px — handles 48MP iPhone photos safely */
+  /* Read EXIF orientation tag from a JPEG file (returns 1–8, default 1) */
+  const getExifOrientation = (file) => new Promise(resolve => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const view = new DataView(e.target.result);
+        if (view.getUint16(0, false) !== 0xFFD8) { resolve(1); return; }
+        let offset = 2;
+        while (offset < view.byteLength) {
+          const marker = view.getUint16(offset, false);
+          offset += 2;
+          if (marker === 0xFFE1) {
+            if (view.getUint32(offset + 2, false) !== 0x45786966) { resolve(1); return; }
+            const little = view.getUint16(offset + 8, false) === 0x4949;
+            const ifd = offset + 8 + view.getUint32(offset + 12, little);
+            const entries = view.getUint16(ifd, little);
+            for (let i = 0; i < entries; i++) {
+              if (view.getUint16(ifd + 2 + i * 12, little) === 0x0112) {
+                resolve(view.getUint16(ifd + 2 + i * 12 + 8, little)); return;
+              }
+            }
+            resolve(1); return;
+          }
+          offset += view.getUint16(offset, false);
+        }
+        resolve(1);
+      } catch (_) { resolve(1); }
+    };
+    reader.onerror = () => resolve(1);
+    reader.readAsArrayBuffer(file.slice(0, 65536)); // only need first 64KB
+  });
+
+  /* Draw img onto canvas respecting EXIF orientation (fixes iPhone photos) */
+  const drawWithOrientation = (img, orientation) => {
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const MAX = 1600;
+    const scale = Math.min(1, MAX / Math.max(w, h));
+    const sw = Math.round(w * scale), sh = Math.round(h * scale);
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    /* orientations 5-8 swap width/height */
+    if (orientation >= 5) { canvas.width = sh; canvas.height = sw; }
+    else                   { canvas.width = sw; canvas.height = sh; }
+    ctx.save();
+    switch (orientation) {
+      case 2: ctx.transform(-1,0,0,1,sw,0); break;
+      case 3: ctx.transform(-1,0,0,-1,sw,sh); break;
+      case 4: ctx.transform(1,0,0,-1,0,sh); break;
+      case 5: ctx.transform(0,1,1,0,0,0); break;
+      case 6: ctx.transform(0,1,-1,0,sh,0); break;
+      case 7: ctx.transform(0,-1,-1,0,sh,sw); break;
+      case 8: ctx.transform(0,-1,1,0,0,sw); break;
+    }
+    ctx.drawImage(img, 0, 0, sw, sh);
+    ctx.restore();
+    return canvas;
+  };
+
+  /* Decode a photo File — handles EXIF rotation, large resolution, HEIC */
   const decodeImageFile = async (file) => {
     const allFmts = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39",
                      "code_93","qr_code","data_matrix","itf","aztec","codabar"];
 
+    /* Load via <img> — Safari applies EXIF orientation visually */
+    const img = await new Promise((res, rej) => {
+      const el = new Image();
+      const url = URL.createObjectURL(file);
+      el.onload  = () => { URL.revokeObjectURL(url); res(el); };
+      el.onerror = () => { URL.revokeObjectURL(url); rej(); };
+      el.src = url;
+    }).catch(() => null);
+    if (!img) return null;
+
+    /* BarcodeDetector: pass <img> element directly — browser already applied
+       EXIF orientation here, so the image is always right-side up */
     if ("BarcodeDetector" in window) {
       try {
         const supported = await BarcodeDetector.getSupportedFormats().catch(() => allFmts);
         const fmts = allFmts.filter(f => supported.includes(f));
         const bd = new BarcodeDetector({ formats: fmts.length ? fmts : allFmts });
-
-        /* Pass Blob directly — avoids full-res canvas, works on iOS */
-        const hits = await bd.detect(file).catch(() => []);
+        const hits = await bd.detect(img).catch(() => []);
         if (hits.length) return hits[0].rawValue;
-
-        /* Fallback: ImageBitmap snapshot */
-        const bmp = await createImageBitmap(file).catch(() => null);
-        if (bmp) {
-          const bmpHits = await bd.detect(bmp).catch(() => []);
-          bmp.close();
-          if (bmpHits.length) return bmpHits[0].rawValue;
-        }
       } catch (_) {}
     }
 
-    /* ZXing: scale down to ≤1600px so 48MP iPhone photos don't crash canvas */
+    /* ZXing: draw to canvas with manual EXIF correction, scale to ≤1600px */
     if (window.ZXing?.MultiFormatReader) {
       try {
-        const bmp = await createImageBitmap(file);
-        const MAX = 1600;
-        const scale = Math.min(1, MAX / Math.max(bmp.width, bmp.height));
-        const w = Math.round(bmp.width * scale);
-        const h = Math.round(bmp.height * scale);
-        const cv  = document.createElement("canvas");
-        cv.width = w; cv.height = h;
-        const ctx = cv.getContext("2d");
-        ctx.drawImage(bmp, 0, 0, w, h);
-        bmp.close();
-        const id  = ctx.getImageData(0, 0, w, h);
-        const hints = new Map([[ZXing.DecodeHintType.TRY_HARDER, true]]);
+        const orientation = await getExifOrientation(file);
+        const canvas = drawWithOrientation(img, orientation);
+        const ctx    = canvas.getContext("2d");
+        const id     = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const hints  = new Map([[ZXing.DecodeHintType.TRY_HARDER, true]]);
         const reader = new ZXing.MultiFormatReader();
         reader.setHints(hints);
-        const lum = new ZXing.RGBLuminanceSource(id.data, w, h);
+        const lum = new ZXing.RGBLuminanceSource(id.data, canvas.width, canvas.height);
         return reader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum))).getText();
       } catch (_) {}
     }
