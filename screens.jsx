@@ -82,7 +82,18 @@ function CameraScanner({ onScan, onClose }) {
                         location.hostname === "localhost" ||
                         location.hostname === "127.0.0.1";
     const hasCamera   = !!navigator.mediaDevices?.getUserMedia;
-    const hasDetector = "BarcodeDetector" in window;
+    /* iOS Safari's BarcodeDetector was broken before 17.4.
+       17.4+ (released Mar 2024) ships a working implementation — use it.
+       For iOS < 17.4 fall through to ZXing. */
+    const ua      = navigator.userAgent || "";
+    const isIOS   = /iPad|iPhone|iPod/.test(ua) ||
+                    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    const iosVer  = (() => {
+      if (!isIOS) return 99;
+      const m = ua.match(/OS (\d+)[_.](\d+)/);
+      return m ? parseFloat(m[1] + "." + m[2]) : 0;
+    })();
+    const hasDetector = ("BarcodeDetector" in window) && (!isIOS || iosVer >= 17.4);
     const hasZXing    = !!(window.ZXing?.MultiFormatReader);
 
     if (!hasDetector && !hasZXing) {
@@ -111,6 +122,11 @@ function CameraScanner({ onScan, onClose }) {
         const v = videoRef.current;
         if (!v) { stream.getTracks().forEach(t => t.stop()); return; }
         v.srcObject = stream;
+        /* iOS Safari requires user-initiated play sometimes — set inline attrs
+           BEFORE play() and catch any AbortError silently */
+        v.setAttribute("playsinline", "true");
+        v.setAttribute("webkit-playsinline", "true");
+        v.muted = true;
         const tryPlay = () => v.play().catch(() => {});
         if (v.readyState >= 1) tryPlay(); else v.onloadedmetadata = tryPlay;
 
@@ -176,8 +192,23 @@ function CameraScanner({ onScan, onClose }) {
         };
         timerRef.current = setInterval(scan, 250);
 
-      } catch (_) {
-        if (!dead) setPhase("photo"); // any camera error → photo mode
+      } catch (err) {
+        if (dead) return;
+        const name = err?.name || "";
+        if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+          setPhase("photo");
+          setErrMsg(
+            "อนุญาตให้ใช้กล้องไม่สำเร็จ\n" +
+            "iPhone: Settings → Safari → Camera → Allow\n" +
+            "หรือกดปุ่ม 'ถ่ายรูปบาร์โค้ด' ด้านล่าง"
+          );
+        } else if (name === "NotFoundError" || name === "OverconstrainedError") {
+          setPhase("photo");
+          setErrMsg("ไม่พบกล้องหลัง — กดปุ่มถ่ายรูปด้านล่างแทน");
+        } else {
+          setPhase("photo");
+          setErrMsg("เปิดกล้องไม่สำเร็จ (" + (name || "ไม่ทราบสาเหตุ") + ") — กดปุ่มถ่ายรูปด้านล่าง");
+        }
       }
     })();
 
@@ -313,37 +344,166 @@ function CameraScanner({ onScan, onClose }) {
 }
 
 /* ========= INBOUND ========= */
+/* ── Quick-add modal: register an unknown barcode and receive it in one step ── */
+function QuickAddInboundModal({ sku, onConfirm, onClose }) {
+  const cats      = useMemo(() => [...new Set(PRODUCTS.map(p => p.cat))].filter(Boolean).sort(), []);
+  const suppliers = useMemo(() => [...new Set(PRODUCTS.map(p => p.supplier))].filter(Boolean).sort(), []);
+  const [name,     setName]     = useState("");
+  const [cat,      setCat]      = useState(cats[0] || "ทั่วไป");
+  const [loc,      setLoc]      = useState("");
+  const [price,    setPrice]    = useState("");
+  const [reorder,  setReorder]  = useState("30");
+  const [supplier, setSupplier] = useState(suppliers[0] || "");
+  const [qty,      setQty]      = useState("1");
+  const nameRef = useRef(null);
+  useEffect(() => { setTimeout(() => nameRef.current?.focus(), 60); }, []);
+
+  const canSave = name.trim() && (parseInt(qty) > 0);
+
+  const confirm = () => {
+    if (!canSave) { nameRef.current?.focus(); return; }
+    const product = {
+      sku,
+      name:     name.trim(),
+      cat:      cat || "ทั่วไป",
+      loc:      loc.trim().toUpperCase() || "—",
+      price:    parseFloat(price) || 0,
+      cost:     Math.round((parseFloat(price) || 0) * 0.6),
+      qty:      0,          // start at 0; receiving adds on top
+      reserved: 0,
+      reorder:  parseInt(reorder) || 30,
+      supplier: supplier.trim() || "ไม่ระบุ",
+    };
+    onConfirm(product, parseInt(qty) || 1);
+  };
+
+  return (
+    <>
+      <div className="drawer-backdrop" onClick={onClose}/>
+      <div className="modal" style={{ maxWidth: 480, maxHeight: "90vh", overflowY: "auto" }}>
+        <div className="modal-head">
+          <div>
+            <h3>เพิ่มสินค้าใหม่ + รับเข้า</h3>
+            <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>
+              บาร์โค้ด <span className="mono" style={{ color: "var(--fg)" }}>{sku}</span> ยังไม่มีในระบบ — กรอกข้อมูลเพื่อสร้างและรับเข้าพร้อมกัน
+            </div>
+          </div>
+          <button className="btn btn-ghost btn-icon" onClick={onClose}><Icons.X/></button>
+        </div>
+
+        <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+          {/* SKU (read-only, pre-filled from scan) */}
+          <div className="field">
+            <label>รหัส SKU</label>
+            <input className="input mono" value={sku} readOnly
+              style={{ fontFamily: "IBM Plex Mono, monospace", background: "var(--surface-2)", color: "var(--muted)" }}/>
+          </div>
+
+          {/* Name — required */}
+          <div className="field">
+            <label>ชื่อสินค้า <span style={{ color: "var(--danger)" }}>*</span></label>
+            <input ref={nameRef} className="input" value={name}
+              onChange={e => setName(e.target.value)}
+              onKeyDown={e => { if (e.key === "Enter") confirm(); }}
+              placeholder="เช่น กระเป๋าเป้ลายพราง 30L"/>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div className="field">
+              <label>หมวดหมู่</label>
+              <select className="input" value={cat} onChange={e => setCat(e.target.value)}>
+                {cats.map(c => <option key={c} value={c}>{c}</option>)}
+                <option value="ทั่วไป">ทั่วไป</option>
+              </select>
+            </div>
+            <div className="field">
+              <label>ตำแหน่งจัดเก็บ</label>
+              <input className="input mono" value={loc} onChange={e => setLoc(e.target.value.toUpperCase())}
+                placeholder="เช่น A-01-01"/>
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            <div className="field">
+              <label>ราคาขาย (฿)</label>
+              <input className="input" type="number" min="0" value={price}
+                onChange={e => setPrice(e.target.value)} placeholder="0" style={{ textAlign: "right" }}/>
+            </div>
+            <div className="field">
+              <label>จุดสั่งซื้อใหม่</label>
+              <input className="input" type="number" min="0" value={reorder}
+                onChange={e => setReorder(e.target.value)} style={{ textAlign: "right" }}/>
+            </div>
+          </div>
+
+          <div className="field">
+            <label>ผู้จัดส่ง</label>
+            <input className="input" value={supplier} onChange={e => setSupplier(e.target.value)} placeholder="ชื่อ supplier"/>
+          </div>
+
+          {/* Qty to receive */}
+          <div style={{ padding: "14px 16px", background: "var(--accent-soft,var(--surface-2))", borderRadius: 12,
+                        border: "1.5px solid var(--accent)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <div>
+              <div style={{ fontWeight: 600, fontSize: 14 }}>จำนวนรับเข้าครั้งนี้</div>
+              <div style={{ fontSize: 12, color: "var(--muted)", marginTop: 2 }}>จะถูกเพิ่มในรายการรับเข้าทันที</div>
+            </div>
+            <input className="input" type="number" min="1" value={qty}
+              onChange={e => setQty(e.target.value)}
+              style={{ width: 80, textAlign: "center", fontWeight: 700, fontSize: 18 }}/>
+          </div>
+        </div>
+
+        <div className="modal-foot">
+          <button className="btn" onClick={onClose}>ยกเลิก</button>
+          <button className="btn btn-primary" disabled={!canSave}
+            style={!canSave ? { opacity: 0.45, cursor: "not-allowed" } : {}}
+            onClick={confirm}>
+            <Icons.Check size={14}/> สร้างสินค้า + รับเข้า {parseInt(qty) || 1} ชิ้น
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function Inbound({ goTo, pushToast }) {
   const [received, setReceived] = useState([]);
   const [scan, setScan] = useState("");
   const [flash, setFlash] = useState(null);
   const [camOpen, setCamOpen] = useState(false);
+  const [quickAdd, setQuickAdd] = useState(null); // null | { sku: string }
   const [closeConfirm, setCloseConfirm] = useState(null); // null | { changes }
   const [closed, setClosed] = useState(false); // true once job is committed
   const inputRef = useRef(null);
 
   useEffect(() => { inputRef.current?.focus(); }, []);
 
+  const addToReceived = (sku, name, loc, qty) => {
+    const t = new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" });
+    setReceived(prev => {
+      const idx = prev.findIndex(r => r.sku === sku);
+      if (idx > -1) {
+        const next = [...prev];
+        next[idx] = { ...next[idx], qty: next[idx].qty + qty, t };
+        return [next[idx], ...next.filter((_, i) => i !== idx)];
+      }
+      return [{ sku, name, qty, loc, t }, ...prev];
+    });
+  };
+
   const submitScan = (override) => {
     const code = (override ?? scan).trim();
     if (!code) return;
     const p = PRODUCTS.find(x => x.sku.toLowerCase() === code.toLowerCase());
     if (!p) {
-      setFlash({ sku: code, name: null, notFound: true });
-      setTimeout(() => setFlash(null), 2500);
+      /* Unknown SKU → open quick-register modal instead of plain error */
+      setQuickAdd({ sku: code });
       setScan("");
       return;
     }
-    const entry = { sku: p.sku, name: p.name, qty: 1, loc: p.loc, t: new Date().toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" }) };
-    setReceived(prev => {
-      const idx = prev.findIndex(r => r.sku === p.sku);
-      if (idx > -1) {
-        const next = [...prev];
-        next[idx] = { ...next[idx], qty: next[idx].qty + 1, t: entry.t };
-        return [next[idx], ...next.filter((_, i) => i !== idx)];
-      }
-      return [entry, ...prev];
-    });
+    addToReceived(p.sku, p.name, p.loc, 1);
     setFlash({ sku: p.sku, name: p.name, notFound: false });
     setTimeout(() => setFlash(null), 1200);
     setScan("");
@@ -410,6 +570,26 @@ function Inbound({ goTo, pushToast }) {
           <button className="btn btn-accent" style={{ margin: 4 }} onClick={() => submitScan()}>บันทึก</button>
         </div>
         {camOpen && <CameraScanner onScan={code => { submitScan(code); setCamOpen(false); }} onClose={() => setCamOpen(false)}/>}
+        {quickAdd && (
+          <QuickAddInboundModal
+            sku={quickAdd.sku}
+            onClose={() => setQuickAdd(null)}
+            onConfirm={(product, qty) => {
+              addProductToStore(product);
+              addToReceived(product.sku, product.name, product.loc, qty);
+              if (typeof recordChange === "function") {
+                recordChange({
+                  entity: "product", action: "add",
+                  summary: `เพิ่มสินค้าใหม่ ${product.sku} — ${product.name} (สร้างจากการสแกนรับเข้า)`,
+                });
+              }
+              setQuickAdd(null);
+              setFlash({ sku: product.sku, name: product.name, notFound: false });
+              setTimeout(() => setFlash(null), 1800);
+              pushToast(`เพิ่มสินค้า ${product.sku} และรับเข้า ${qty} ชิ้นสำเร็จ`);
+            }}
+          />
+        )}
 
         <div className="row" style={{ gap: 8, flexWrap: "wrap" }}>
           <span style={{ fontSize: 12, color: "var(--muted)", marginRight: 4 }}>ทดลองสแกน:</span>
@@ -422,9 +602,9 @@ function Inbound({ goTo, pushToast }) {
 
         {flash && (
           flash.notFound ? (
-            <div className="row" style={{ padding: "10px 14px", background: "var(--danger-soft)", color: "var(--danger)", borderRadius: 10, fontSize: 13, fontWeight: 500 }}>
-              <Icons.X size={18}/> ไม่พบ SKU: <span className="mono" style={{ marginLeft: 6 }}>{flash.sku}</span>
-              <span style={{ fontWeight: 400, marginLeft: 6, fontSize: 12 }}>— กรุณาตรวจสอบรหัสสินค้า</span>
+            <div className="row" style={{ padding: "10px 14px", background: "var(--warning-soft,var(--surface-2))", color: "var(--warning,var(--fg))", borderRadius: 10, fontSize: 13, fontWeight: 500, gap: 8 }}>
+              <Icons.Warn size={18}/> ไม่พบ SKU: <span className="mono" style={{ marginLeft: 4 }}>{flash.sku}</span>
+              <span style={{ fontWeight: 400, fontSize: 12 }}>— กำลังเปิดฟอร์มเพิ่มสินค้าใหม่…</span>
             </div>
           ) : (
             <div className="row" style={{ padding: "10px 14px", background: "var(--success-soft)", color: "var(--success)", borderRadius: 10, fontSize: 13, fontWeight: 500 }}>
