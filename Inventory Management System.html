@@ -1,13 +1,13 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="th">
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
-  <title>คลังพร้อมส่ง — Inventory Management System</title>
+  <title>à¸„à¸¥à¸±à¸‡à¸žà¸£à¹‰à¸­à¸¡à¸ªà¹ˆà¸‡ â€” Inventory Management System</title>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Thai:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
-  <link rel="stylesheet" href="styles.css?v=20260526i"/>
+  <link rel="stylesheet" href="styles.css?v=20260527c"/>
   <style>
     /* Print: only labels print, with proper paper sizing */
     @media print {
@@ -32,25 +32,28 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
-  <!-- ZXing: barcode fallback for browsers without native BarcodeDetector (Firefox, older iOS) -->
+  <!-- ZXing: barcode fallback for browsers without native BarcodeDetector -->
   <script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js"></script>
+  <!-- html5-qrcode: photo-mode scanning (ZXing-based, handles EXIF orientation) -->
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 
-  <script type="text/babel" src="tweaks-panel.jsx?v=20260526i"></script>
-  <script type="text/babel" src="data.jsx?v=20260526i"></script>
-  <script type="text/babel" src="supabase.jsx?v=20260526i"></script>
-  <script type="text/babel" src="icons.jsx?v=20260526i"></script>
-  <script type="text/babel" src="product-images.jsx?v=20260526i"></script>
-  <script type="text/babel" src="screens.jsx?v=20260526i"></script>
-  <script type="text/babel" src="dashboard.jsx?v=20260526i"></script>
-  <script type="text/babel" src="labels.jsx?v=20260526i"></script>
-  <script type="text/babel" src="settings.jsx?v=20260526i"></script>
-  <script type="text/babel" src="audit.jsx?v=20260526i"></script>
-  <script type="text/babel" src="tracking.jsx?v=20260526i"></script>
-  <script type="text/babel" src="analytics.jsx?v=20260526i"></script>
-  <script type="text/babel" src="handheld.jsx?v=20260526i"></script>
-  <script type="text/babel" src="import.jsx?v=20260526i"></script>
-  <script type="text/babel" src="bundles.jsx?v=20260526i"></script>
-  <script type="text/babel" src="auth.jsx?v=20260526i"></script>
-  <script type="text/babel" src="app.jsx?v=20260526i"></script>
+  <script type="text/babel" src="tweaks-panel.jsx?v=20260527c"></script>
+  <script type="text/babel" src="data.jsx?v=20260527c"></script>
+  <script type="text/babel" src="supabase.jsx?v=20260527c"></script>
+  <script type="text/babel" src="icons.jsx?v=20260527c"></script>
+  <script type="text/babel" src="product-images.jsx?v=20260527c"></script>
+  <script type="text/babel" src="screens.jsx?v=20260527c"></script>
+  <script type="text/babel" src="dashboard.jsx?v=20260527c"></script>
+  <script type="text/babel" src="labels.jsx?v=20260527c"></script>
+  <script type="text/babel" src="settings.jsx?v=20260527c"></script>
+  <script type="text/babel" src="audit.jsx?v=20260527c"></script>
+  <script type="text/babel" src="tracking.jsx?v=20260527c"></script>
+  <script type="text/babel" src="analytics.jsx?v=20260527c"></script>
+  <script type="text/babel" src="handheld.jsx?v=20260527c"></script>
+  <script type="text/babel" src="import.jsx?v=20260527c"></script>
+  <script type="text/babel" src="bundles.jsx?v=20260527c"></script>
+  <script type="text/babel" src="auth.jsx?v=20260527c"></script>
+  <script type="text/babel" src="app.jsx?v=20260527c"></script>
 </body>
 </html>
+

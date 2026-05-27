@@ -96,20 +96,19 @@ function CameraScanner({ onScan, onClose }) {
     const hasDetector = "BarcodeDetector" in window;
     const hasZXing    = !!(window.ZXing?.MultiFormatReader);
 
-    if (!hasDetector && !hasZXing) {
+    if (!hasDetector && !hasZXing && !window.Html5Qrcode) {
       setPhase("unsupported");
       setErrMsg(
         "เบราว์เซอร์ไม่รองรับการอ่านบาร์โค้ด\n" +
-        "แนะนำ Chrome / Edge บน Android หรือ Safari 17.4+ บน iOS\n" +
+        "แนะนำ Chrome / Edge บน Android หรือ Safari บน iOS\n" +
         "หรือพิมพ์รหัส SKU ในช่องด้านล่างแทนได้เลย"
       );
       return;
     }
 
-    /* iOS: live-video BarcodeDetector silently returns empty results in
-       Safari even on 17.5. Photo mode (capture="environment") gives a
-       sharp still image that decodes reliably using the native iOS camera. */
-    if (isIOS) { setPhase("photo"); return; }
+    /* iOS 18+ (incl. iPhone 16/17 Pro): BarcodeDetector on live video works.
+       Earlier versions (< 17.4) had a bug — keep photo fallback for those. */
+    if (isIOS && iosVer < 17.4) { setPhase("photo"); return; }
 
     /* Non-HTTPS / no camera: fall to photo mode */
     if (!isSecure || !hasCamera) { setPhase("photo"); return; }
@@ -134,50 +133,71 @@ function CameraScanner({ onScan, onClose }) {
         const tryPlay = () => v.play().catch(() => {});
         if (v.readyState >= 1) tryPlay(); else v.onloadedmetadata = tryPlay;
 
-        /* ── detector setup ──────────────────────────────────────────
-           BarcodeDetector: feed the <video> element directly — no canvas
-             needed, avoids cross-origin / tainted-canvas issues on iOS.
-           ZXing: needs ImageData, so use an offscreen canvas only for that. */
-        let detectFn;
+        const FMTS = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39",
+                      "code_93","qr_code","data_matrix","itf","aztec","codabar"];
+
+        /* Offscreen canvas for per-frame capture */
+        const fCanvas = document.createElement("canvas");
+        const fCtx    = fCanvas.getContext("2d", { willReadFrequently: true });
+
+        /* BarcodeDetector — native on Chrome/Android/Safari 17.4+ */
+        let bd = null;
         if (hasDetector) {
-          const allFmts = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39",
-                           "code_93","qr_code","data_matrix","itf","aztec","codabar"];
-          const supported = await BarcodeDetector.getSupportedFormats().catch(() => allFmts);
-          const fmts = allFmts.filter(f => supported.includes(f));
-          const bd = new BarcodeDetector({ formats: fmts.length ? fmts : allFmts });
-          detectFn = async (vid) => {
-            /* Pass video element directly — most reliable on iOS Safari */
-            const hits = await bd.detect(vid);
-            return hits.length ? hits[0].rawValue : null;
-          };
-        } else {
-          /* ZXing fallback — needs canvas + ImageData */
-          const zCanvas = document.createElement("canvas");
-          const zCtx    = zCanvas.getContext("2d", { willReadFrequently: true });
-          const hints   = new Map([[ZXing.DecodeHintType.TRY_HARDER, true]]);
-          const reader  = new ZXing.MultiFormatReader();
-          reader.setHints(hints);
-          detectFn = async (vid) => {
-            const w = vid.videoWidth || 640, h = vid.videoHeight || 480;
-            if (zCanvas.width !== w)  zCanvas.width  = w;
-            if (zCanvas.height !== h) zCanvas.height = h;
-            zCtx.drawImage(vid, 0, 0, w, h);
-            try {
-              const id  = zCtx.getImageData(0, 0, w, h);
-              const lum = new ZXing.RGBLuminanceSource(id.data, w, h);
-              return reader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum))).getText();
-            } catch (_) { return null; }
-          };
+          const supported = await BarcodeDetector.getSupportedFormats().catch(() => FMTS);
+          const fmts = FMTS.filter(f => supported.includes(f));
+          bd = new BarcodeDetector({ formats: fmts.length ? fmts : FMTS });
         }
 
+        /* ZXing — free fallback for Firefox / older browsers */
+        let zReader = null;
+        if (hasZXing) {
+          const hints = new Map([[ZXing.DecodeHintType.TRY_HARDER, true]]);
+          zReader = new ZXing.MultiFormatReader();
+          zReader.setHints(hints);
+        }
+
+        const detectFn = async (vid) => {
+          const w = vid.videoWidth || 640, h = vid.videoHeight || 480;
+          if (fCanvas.width !== w)  fCanvas.width  = w;
+          if (fCanvas.height !== h) fCanvas.height = h;
+          fCtx.drawImage(vid, 0, 0, w, h);
+
+          /* 1. BarcodeDetector — fastest, most reliable on modern devices */
+          if (bd) {
+            try {
+              const bmp  = await createImageBitmap(fCanvas);
+              const hits = await bd.detect(bmp);
+              bmp.close();
+              if (hits.length) return hits[0].rawValue;
+            } catch (_) {}
+          }
+
+          /* 2. ZXing — try center crop first (where the scan line is),
+                        then fall back to full frame */
+          if (zReader) {
+            const tryZXing = (imgData, iw, ih) => {
+              try {
+                const lum = new ZXing.RGBLuminanceSource(imgData.data, iw, ih);
+                return zReader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum))).getText();
+              } catch (_) { return null; }
+            };
+            const cx = Math.floor(w * 0.1), cy = Math.floor(h * 0.25);
+            const cw = Math.floor(w * 0.8), ch = Math.floor(h * 0.5);
+            const val = tryZXing(fCtx.getImageData(cx, cy, cw, ch), cw, ch)
+                     ?? tryZXing(fCtx.getImageData(0, 0, w, h), w, h);
+            if (val) return val;
+          }
+
+          return null;
+        };
+
         setPhase("ready");
-        /* Streak = 1: fire as soon as ONE confident detection comes back.
-           Previous streak-2 requirement caused misses when iOS detection
-           took longer than the poll interval. */
+        let scanBusy = false;
         const scan = async () => {
-          if (dead) return;
+          if (dead || scanBusy) return;
           const vid = videoRef.current;
           if (!vid || vid.readyState < 2 || vid.paused) return;
+          scanBusy = true;
           try {
             const val = await detectFn(vid);
             if (val && !dead) {
@@ -187,10 +207,9 @@ function CameraScanner({ onScan, onClose }) {
               onScan(val);
             }
           } catch (_) {}
+          scanBusy = false;
         };
-        /* 300ms gives iOS enough time to finish each detect() call
-           without overlapping; no busyFlag needed since we await inside */
-        timerRef.current = setInterval(scan, 300);
+        timerRef.current = setInterval(scan, 400);
 
       } catch (err) {
         if (dead) return;
@@ -219,86 +238,32 @@ function CameraScanner({ onScan, onClose }) {
     };
   }, []);
 
-  /* Draw image onto canvas at a given rotation, scaled to MAX dim ≤ 1600 */
-  const rotateToCanvas = (img, deg) => {
-    const w = img.naturalWidth, h = img.naturalHeight;
-    const MAX = 1600;
-    const s = Math.min(1, MAX / Math.max(w, h));
-    const sw = Math.round(w * s), sh = Math.round(h * s);
-    const canvas = document.createElement("canvas");
-    const rad = (deg * Math.PI) / 180;
-    if (deg === 90 || deg === 270) { canvas.width = sh; canvas.height = sw; }
-    else                            { canvas.width = sw; canvas.height = sh; }
-    const ctx = canvas.getContext("2d");
-    ctx.save();
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.rotate(rad);
-    ctx.drawImage(img, -sw / 2, -sh / 2, sw, sh);
-    ctx.restore();
-    return canvas;
-  };
-
-  /* Decode a photo File — try multiple orientations to handle EXIF /
-     rotation issues on iPhone and other devices */
+  /* Decode a photo File.
+     1. BarcodeDetector — native, fast, handles orientation automatically
+     2. html5-qrcode    — ZXing-based, handles EXIF rotation                 */
   const decodeImageFile = async (file, onProgress) => {
-    const allFmts = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39",
-                     "code_93","qr_code","data_matrix","itf","aztec","codabar","pdf417"];
+    onProgress?.("กำลังวิเคราะห์ภาพ…");
 
-    /* Load via <img> — Safari handles HEIC + JPEG, applies EXIF for img */
-    const img = await new Promise((res) => {
-      const el = new Image();
-      const url = URL.createObjectURL(file);
-      el.onload  = () => { URL.revokeObjectURL(url); res(el); };
-      el.onerror = () => { URL.revokeObjectURL(url); res(null); };
-      el.src = url;
-    });
-    if (!img) return null;
-
-    /* Cache supported formats / detector */
-    let bd = null;
+    /* 1. BarcodeDetector */
     if ("BarcodeDetector" in window) {
       try {
-        const supported = await BarcodeDetector.getSupportedFormats().catch(() => allFmts);
-        const fmts = allFmts.filter(f => supported.includes(f));
-        bd = new BarcodeDetector({ formats: fmts.length ? fmts : allFmts });
+        const bitmap = await createImageBitmap(file);
+        const bd     = new BarcodeDetector({ formats: ["ean_13","ean_8","upc_a","upc_e",
+          "code_128","code_39","code_93","qr_code","data_matrix","itf","aztec","codabar","pdf417"] });
+        const hits   = await bd.detect(bitmap);
+        bitmap.close();
+        if (hits.length) return hits[0].rawValue;
       } catch (_) {}
     }
-    const hints = new Map([[window.ZXing?.DecodeHintType.TRY_HARDER, true]]);
 
-    const tryDecode = async (input, isCanvas) => {
-      if (bd) {
-        const hits = await bd.detect(input).catch(() => []);
-        if (hits.length) return hits[0].rawValue;
-      }
-      if (isCanvas && window.ZXing?.MultiFormatReader) {
-        try {
-          const ctx = input.getContext("2d");
-          const id  = ctx.getImageData(0, 0, input.width, input.height);
-          const reader = new ZXing.MultiFormatReader();
-          reader.setHints(hints);
-          const lum = new ZXing.RGBLuminanceSource(id.data, input.width, input.height);
-          return reader.decode(new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum))).getText();
-        } catch (_) {}
-      }
-      return null;
-    };
-
-    /* Step 1: pass <img> directly (browser handles EXIF) */
-    onProgress?.("กำลังวิเคราะห์ภาพ…");
-    let result = await tryDecode(img, false);
-    if (result) return result;
-
-    /* Step 2: try canvas at 0° (covers case where browser didn't apply EXIF) */
-    onProgress?.("กำลังลองมุมที่ 1/4…");
-    result = await tryDecode(rotateToCanvas(img, 0), true);
-    if (result) return result;
-
-    /* Step 3: try the other 3 rotations */
-    for (const deg of [90, 180, 270]) {
-      onProgress?.(`กำลังลองมุมที่ ${{90:2,180:3,270:4}[deg]}/4…`);
-      result = await tryDecode(rotateToCanvas(img, deg), true);
-      if (result) return result;
+    /* 2. html5-qrcode */
+    if (window.Html5Qrcode) {
+      try {
+        const scanner = new Html5Qrcode("__h5qr__", { verbose: false });
+        return await scanner.scanFile(file, false);
+      } catch (_) {}
     }
+
     return null;
   };
 
@@ -317,9 +282,10 @@ function CameraScanner({ onScan, onClose }) {
     setScanProgress("");
     /* Show debug info to help diagnose why detection failed */
     setScanDebug(
-      `ขนาดไฟล์ ${(file.size/1024).toFixed(0)} KB · ` +
+      `${file.type || "?"} · ${(file.size/1024).toFixed(0)} KB · ` +
       `BarcodeDetector ${"BarcodeDetector" in window ? "✓" : "✗"} · ` +
-      `ZXing ${window.ZXing?.MultiFormatReader ? "✓" : "✗"} · ` +
+      `ZXing ${window.ZXing ? "✓" : "✗"} · ` +
+      `html5-qrcode ${window.Html5Qrcode ? "✓" : "✗"} · ` +
       `เวลา ${elapsed}ms`
     );
     setErrMsg("ไม่พบบาร์โค้ดในภาพ — ลองถ่ายให้ใกล้ขึ้น ชัดขึ้น หรือเปิดไฟมากขึ้น");
